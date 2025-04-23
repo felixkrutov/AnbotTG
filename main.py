@@ -1,8 +1,8 @@
-# --- НАЧАЛО ПОЛНОГО КОДА main.py (ВЕРСИЯ С ПОЛЛИНГОМ) ---
+# --- НАЧАЛО ПОЛНОГО КОДА main.py (v5 - НОВАЯ МОДЕЛЬ GROQ) ---
 import os
 import logging
 import asyncio
-from contextlib import asynccontextmanager # Убираем, не нужен для поллинга
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 import json
 
@@ -13,9 +13,6 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import CommandStart
 from aiogram.enums import ParseMode
 from aiogram.types import BotCommand, Update
-# Убираем импорты вебхуков
-# from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-# from aiohttp import web
 
 from fastapi import FastAPI, HTTPException, Depends, Body, Request, status, Header, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,10 +30,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "default_secret_key_please_change")
-# Убираем переменные вебхука
-# WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")
-# WEBHOOK_PATH = f"/webhook/{TELEGRAM_BOT_TOKEN}"
-# WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "my-super-secret")
 HISTORY_LIMIT = 50
 
 # --- 2. Настройка логирования ---
@@ -51,13 +44,12 @@ try:
     logger.info("Клиент Supabase V2+ инициализирован.")
     default_properties = DefaultBotProperties(parse_mode=ParseMode.HTML)
     bot = Bot(token=TELEGRAM_BOT_TOKEN, default=default_properties)
-    dp = Dispatcher() # Можно добавить storage если нужен FSM: storage=MemoryStorage()
+    dp = Dispatcher()
     logger.info("Бот Telegram и Dispatcher инициализированы.")
 except Exception as e: logger.error(f"Ошибка при инициализации: {e}", exc_info=True); raise
 
-# --- 4. Настройка FastAPI (БЕЗ lifespan) ---
-# Убираем lifespan, т.к. вебхук не используется
-app = FastAPI(openapi_url="/api/v1/openapi.json", docs_url="/api/docs", redoc_url="/api/redoc")
+# --- 4. Настройка FastAPI ---
+app = FastAPI(openapi_url="/api/v1/openapi.json", docs_url="/api/docs", redoc_url="/api/redoc") # Убрали lifespan
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- 5. Фоновая задача для запуска поллинга ---
@@ -66,28 +58,13 @@ async def start_bot_polling():
     global polling_task
     logger.info("Запуск Telegram Bot Polling...")
     try:
-        # Удаляем вебхук перед запуском поллинга (на всякий случай)
         webhook_info = await bot.get_webhook_info()
-        if webhook_info.url:
-            logger.warning(f"Обнаружен активный вебхук ({webhook_info.url}). Удаляем его перед запуском поллинга...")
-            await bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Вебхук удален.")
-
-        await bot.set_my_commands([BotCommand(command="start", description="Начать")])
-        logger.info("Команды бота установлены.")
-
-        # Запуск поллинга
-        # Передаем dp в bot.start_polling
-        # await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()) # Старый метод
-        await dp.start_polling(bot) # Упрощенный вызов
-
-    except asyncio.CancelledError:
-        logger.info("Задача поллинга отменена.")
-    except Exception as e:
-        logger.error(f"Ошибка в задаче поллинга: {e}", exc_info=True)
-    finally:
-        logger.warning("Polling task завершился.")
-        polling_task = None # Сбрасываем
+        if webhook_info.url: logger.warning(f"Обнаружен вебхук ({webhook_info.url}). Удаляем..."); await bot.delete_webhook(drop_pending_updates=True); logger.info("Вебхук удален.")
+        await bot.set_my_commands([BotCommand(command="start", description="Начать")]); logger.info("Команды бота установлены.")
+        await dp.start_polling(bot)
+    except asyncio.CancelledError: logger.info("Задача поллинга отменена.")
+    except Exception as e: logger.error(f"Ошибка в задаче поллинга: {e}", exc_info=True)
+    finally: logger.warning("Polling task завершился."); polling_task = None
 
 @app.on_event("startup")
 async def on_startup():
@@ -99,19 +76,13 @@ async def on_startup():
 async def on_shutdown():
     global polling_task
     logger.info("FastAPI shutdown: Остановка поллинга...")
-    if polling_task and not polling_task.done():
-        polling_task.cancel()
-        logger.info("Запрос на отмену поллинга отправлен.")
-    # Закрытие сессии бота
+    if polling_task and not polling_task.done(): polling_task.cancel(); logger.info("Запрос на отмену поллинга.")
     try:
         if bot and bot.session: await bot.session.close(); logger.info("Сессия Aiogram Bot закрыта.")
     except Exception as e_close: logger.error(f"Ошибка закрытия сессии бота: {e_close}", exc_info=True)
     logger.info("FastAPI shutdown завершен.")
 
-
 # --- 6. Функции Supabase (СИНХРОННЫЕ ВЫЗОВЫ) ---
-# ... (get_settings, update_settings_db, get_message_history, add_message_to_history БЕЗ await перед execute) ...
-# Оставляем тот же код, что работал в админке
 async def get_settings():
     try: query = supabase.table("settings").select("groq_api_key, system_prompt").eq("id", 1).limit(1); result = query.execute()
     except Exception as e: logger.error(f"Sync Supabase get_settings error: {e}", exc_info=True); return {"groq_api_key": None, "system_prompt": "..."}
@@ -138,32 +109,46 @@ async def add_message_to_history(user_id: str, role: str, content: str):
     except Exception as e_clean: logger.error(f"Sync Supabase add_message_to_history (cleanup) error for {user_id}: {e_clean}", exc_info=True)
     return True
 
-# --- 7. Функция Groq (без изменений) ---
+# --- 7. Функция Groq (С НОВОЙ МОДЕЛЬЮ) ---
 async def get_groq_response(system_prompt: str, history: list, groq_api_key: str):
     if not groq_api_key: return "Ошибка: Ключ API Groq не настроен."
-    try: async_groq_client = AsyncGroq(api_key=groq_api_key); messages = [{"role": "system", "content": system_prompt}] + history; chat_completion = await async_groq_client.chat.completions.create(messages=messages, model="llama3-8b-8192"); return chat_completion.choices[0].message.content
-    except Exception as e: logger.error(f"Ошибка Groq API: {e}", exc_info=True); return f"Ошибка ИИ: {str(e)}"
+    try:
+        async_groq_client = AsyncGroq(api_key=groq_api_key)
+        messages = [{"role": "system", "content": system_prompt}] + history
+        logger.info(f"Запрос к Groq с моделью 'meta-llama/llama-4-maverick-17b-128e-instruct'...") # Добавил лог
+        chat_completion = await async_groq_client.chat.completions.create(
+            messages=messages,
+            # ----- ИЗМЕНЕНИЕ ЗДЕСЬ -----
+            model="meta-llama/llama-4-maverick-17b-128e-instruct"
+            # -------------------------
+        )
+        response_content = chat_completion.choices[0].message.content
+        logger.info("Ответ от Groq API получен.")
+        return response_content
+    except Exception as e:
+        logger.error(f"Ошибка Groq API: {e}", exc_info=True)
+        return f"Ошибка ИИ: {str(e)}"
 
-# --- 8. Обработчики Telegram (остаются такими же) ---
+# --- 8. Обработчики Telegram ---
 @dp.message(CommandStart())
 async def handle_start(message: types.Message): await message.answer(f"Привет, {message.from_user.full_name}!")
 @dp.message(F.text)
 async def handle_message(message: types.Message):
     user_id=str(message.from_user.id); user_input=message.text
-    logger.info(f"Polling: Обработка сообщения от {user_id}...") # Меняем префикс лога
+    logger.info(f"Polling: Обработка сообщения от {user_id}...")
     await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    settings = await get_settings() # Вызовет СИНХРОННЫЙ execute внутри
+    settings = await get_settings()
     if not settings.get("groq_api_key"): await message.answer("Ошибка: Ключ API Groq не настроен."); return
-    history = await get_message_history(user_id) # Вызовет СИНХРОННЫЙ execute внутри
-    await add_message_to_history(user_id, "user", user_input) # Вызовет СИНХРОННЫЙ execute внутри
+    history = await get_message_history(user_id)
+    await add_message_to_history(user_id, "user", user_input)
     history.append({"role": "user", "content": user_input})
     if len(history) > HISTORY_LIMIT: history = history[-HISTORY_LIMIT:]
     ai_response = await get_groq_response(settings.get("system_prompt"), history, settings.get("groq_api_key"))
-    await add_message_to_history(user_id, "assistant", ai_response) # Вызовет СИНХРОННЫЙ execute внутри
+    await add_message_to_history(user_id, "assistant", ai_response)
     try: await message.answer(ai_response); logger.info(f"Polling: Ответ отправлен {user_id}.")
     except Exception as e: logger.error(f"Polling: Ошибка отправки ответа {user_id}: {e}", exc_info=True); await message.answer("...")
 
-# --- 9. Обработчики FastAPI (остаются такими же для админки) ---
+# --- 9. Обработчики FastAPI ---
 class SettingsUpdate(BaseModel): groq_api_key: str | None = None; system_prompt: str
 async def verify_admin_secret(x_admin_secret: str | None = Header(None)):
     if not x_admin_secret or x_admin_secret != ADMIN_SECRET_KEY: raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="...")
@@ -173,7 +158,6 @@ async def get_current_settings_api(): logger.info("API /api/settings GET"); retu
 async def update_settings_api(settings_data: SettingsUpdate): logger.info("API /api/settings POST"); success = await update_settings_db(settings_data.groq_api_key, settings_data.system_prompt); return {"message": "OK"} if success else HTTPException(status_code=500, detail="Update failed")
 @app.get("/")
 async def read_root(): return {"message": "Бот жив (режим поллинга)!"}
-# Убираем обработчик вебхука @app.post(WEBHOOK_PATH)
 
 # --- 10. Запуск ---
 if __name__ == "__main__": logger.warning("Запуск через 'python main.py' не рекомендуется.")
