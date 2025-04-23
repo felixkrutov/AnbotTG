@@ -1,0 +1,28 @@
+# Виртуальное окружение
+venv/
+.venv/
+
+# Файл с секретами
+.env
+
+# Python кэш
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Локальные настройки IDE (пример для VSCode)
+.vscode/
+
+# Логи pip
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Логи Uvicorn/FastAPI (если будут)
+*.log
+
+# Windows thumbnails
+Thumbs.db
+
+# macOS специфичные файлы
+.DS_Store
