@@ -1,4 +1,4 @@
-# --- НАЧАЛО ПОЛНОГО КОДА main.py (БЕЗ await для Supabase) ---
+# --- НАЧАЛО ПОЛНОГО КОДА main.py (v3 - ИСПРАВЛЕННЫЙ LIFESPAN) ---
 import os
 import logging
 import asyncio
@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Depends, Body, Request, status, Head
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# --- ВНИМАНИЕ: Снова используем СИНХРОННЫЕ ВЫЗОВЫ Supabase! ---
+# --- Используем СИНХРОННЫЕ ВЫЗОВЫ Supabase ---
 from supabase import create_client, Client as SupabaseClient
 logging.info("Используется supabase-py V2+ (поддерживает async)")
 
@@ -38,11 +38,7 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "my-super-secret")
 HISTORY_LIMIT = 50
 
 # --- 2. Настройка логирования ---
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%(name)s:%(lineno)d] - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
 logger.info(f"--- Старт модуля main.py ---")
@@ -56,58 +52,85 @@ try:
     bot = Bot(token=TELEGRAM_BOT_TOKEN, default=default_properties)
     dp = Dispatcher()
     logger.info("Бот Telegram и Dispatcher инициализированы.")
-except Exception as e:
-    logger.error(f"Ошибка при инициализации: {e}", exc_info=True); raise
+except Exception as e: logger.error(f"Ошибка при инициализации: {e}", exc_info=True); raise
 
 # --- 4. Настройка FastAPI ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info(">>> Lifespan: Startup начался...")
+    # --- Блок установки вебхука ---
     current_webhook_url_to_set = f"{WEBHOOK_BASE_URL.rstrip('/')}{WEBHOOK_PATH}"
-    if not WEBHOOK_BASE_URL: logger.warning(">>> Lifespan: WEBHOOK_BASE_URL пустой! Пропускаем."); yield; return
-    try:
-        logger.info(f">>> Lifespan: Устанавливаем вебхук на {current_webhook_url_to_set}...")
-        await bot.set_webhook(url=current_webhook_url_to_set, secret_token=WEBHOOK_SECRET, allowed_updates=dp.resolve_used_update_types(), drop_pending_updates=True)
-        logger.info(f"--- УСПЕХ! --- >>> Lifespan: Вебхук УСПЕШНО установлен!")
-        try: await bot.set_my_commands([BotCommand(command="start", description="Начать")]); logger.info(">>> Lifespan: Команды бота установлены.")
-        except Exception as e_cmd: logger.error(f">>> Lifespan: Ошибка установки команд: {e_cmd}", exc_info=True)
-    except Exception as e_set: logger.error(f"--- ОШИБКА! --- >>> Lifespan: Ошибка установки вебхука: {e_set}", exc_info=True)
-    logger.info(">>> Lifespan: Startup завершен, yield..."); yield
+    if not WEBHOOK_BASE_URL:
+        logger.warning(">>> Lifespan: WEBHOOK_BASE_URL пустой! Пропускаем установку вебхука.")
+    else:
+        try:
+            logger.info(f">>> Lifespan: Устанавливаем вебхук на {current_webhook_url_to_set}...")
+            await bot.set_webhook(url=current_webhook_url_to_set, secret_token=WEBHOOK_SECRET, allowed_updates=dp.resolve_used_update_types(), drop_pending_updates=True)
+            logger.info(f"--- УСПЕХ! --- >>> Lifespan: Вебхук УСПЕШНО установлен!")
+            try: await bot.set_my_commands([BotCommand(command="start", description="Начать")]); logger.info(">>> Lifespan: Команды бота установлены.")
+            except Exception as e_cmd: logger.error(f">>> Lifespan: Ошибка установки команд: {e_cmd}", exc_info=True)
+        except Exception as e_set: logger.error(f"--- ОШИБКА! --- >>> Lifespan: Ошибка установки вебхука: {e_set}", exc_info=True)
+
+    logger.info(">>> Lifespan: Startup завершен, yield...")
+    yield # Сервер работает
+
+    # --- Блок остановки ---
     logger.info(">>> Lifespan: Shutdown начался...")
-    try: webhook_info = await bot.get_webhook_info();
-    if webhook_info.url: await bot.delete_webhook(drop_pending_updates=True); logger.info(">>> Lifespan: Вебхук удален.")
-    except Exception as e_del: logger.error(f">>> Lifespan: Ошибка удаления вебхука: {e_del}", exc_info=True)
-    try: if bot and bot.session: await bot.session.close(); logger.info(">>> Lifespan: Сессия Aiogram Bot закрыта.")
-    except Exception as e_close: logger.error(f">>> Lifespan: Ошибка закрытия сессии бота: {e_close}", exc_info=True)
+    # --- ИСПРАВЛЕННЫЙ БЛОК УДАЛЕНИЯ ВЕБХУКА ---
+    try:
+        logger.info(">>> Lifespan: Пытаемся получить информацию о вебхуке перед удалением...")
+        webhook_info = await bot.get_webhook_info()
+        logger.info(f">>> Lifespan: Текущий вебхук перед удалением: {webhook_info}")
+        if webhook_info.url: # Удаляем только если он был установлен
+            logger.info(f">>> Lifespan: Удаляем вебхук ({webhook_info.url})...")
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info(">>> Lifespan: Вебхук удален.")
+        else:
+             logger.info(">>> Lifespan: Вебхук не был установлен, удалять нечего.")
+    except Exception as e_del:
+        logger.error(f">>> Lifespan: Ошибка удаления вебхука: {e_del}", exc_info=True)
+    # -----------------------------------------
+    # --- Блок закрытия сессии ---
+    try:
+        if bot and bot.session:
+            logger.info(">>> Lifespan: Пытаемся закрыть сессию бота...")
+            await bot.session.close()
+            logger.info(">>> Lifespan: Сессия Aiogram Bot закрыта.")
+        else:
+             logger.info(">>> Lifespan: Сессия бота не найдена или уже закрыта.")
+    except Exception as e_close:
+        logger.error(f">>> Lifespan: Ошибка закрытия сессии бота: {e_close}", exc_info=True)
+    # ---------------------------
     logger.info(">>> Lifespan: Shutdown завершен.")
 
 app = FastAPI(lifespan=lifespan, openapi_url="/api/v1/openapi.json", docs_url="/api/docs", redoc_url="/api/redoc")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- 6. Функции Supabase (СИНХРОННЫЕ ВЫЗОВЫ) ---
+# ... (get_settings, update_settings_db, get_message_history, add_message_to_history БЕЗ await перед execute, как в рабочей версии) ...
 async def get_settings():
-    try: query = supabase.table("settings").select("groq_api_key, system_prompt").eq("id", 1).limit(1); result = query.execute() # БЕЗ await
+    try: query = supabase.table("settings").select("groq_api_key, system_prompt").eq("id", 1).limit(1); result = query.execute()
     except Exception as e: logger.error(f"Sync Supabase get_settings error: {e}", exc_info=True); return {"groq_api_key": None, "system_prompt": "..."}
     if result.data: data = result.data[0]; return {"groq_api_key": data.get("groq_api_key"), "system_prompt": data.get("system_prompt", "...")}
     else: logger.warning("Settings not found (sync)."); return {"groq_api_key": None, "system_prompt": "..."}
 
 async def update_settings_db(new_groq_key: str | None, new_system_prompt: str):
-    try: payload = {"groq_api_key": new_groq_key, "system_prompt": new_system_prompt}; query = supabase.table("settings").update(payload).eq("id", 1); result = query.execute(); logger.info(f"Settings updated (sync): {result.data}"); return True # БЕЗ await
+    try: payload = {"groq_api_key": new_groq_key, "system_prompt": new_system_prompt}; query = supabase.table("settings").update(payload).eq("id", 1); result = query.execute(); logger.info(f"Settings updated (sync): {result.data}"); return True
     except Exception as e: logger.error(f"Sync Supabase update_settings_db error: {e}", exc_info=True); return False
 
 async def get_message_history(user_id: str):
-    try: query = (supabase.table("message_history").select("role, content").eq("user_id", user_id).order("created_at", desc=True).limit(HISTORY_LIMIT)); result = query.execute(); return [{"role": msg["role"], "content": msg["content"]} for msg in reversed(result.data)] # БЕЗ await
+    try: query = (supabase.table("message_history").select("role, content").eq("user_id", user_id).order("created_at", desc=True).limit(HISTORY_LIMIT)); result = query.execute(); return [{"role": msg["role"], "content": msg["content"]} for msg in reversed(result.data)]
     except Exception as e: logger.error(f"Sync Supabase get_message_history error for {user_id}: {e}", exc_info=True); return []
 
 async def add_message_to_history(user_id: str, role: str, content: str):
-    try: payload = {"user_id": user_id, "role": role, "content": content}; insert_query = supabase.table("message_history").insert(payload); insert_query.execute() # БЕЗ await
+    try: payload = {"user_id": user_id, "role": role, "content": content}; insert_query = supabase.table("message_history").insert(payload); insert_query.execute()
     except Exception as e_ins: logger.error(f"Sync Supabase add_message_to_history (insert) error for {user_id}: {e_ins}", exc_info=True); return False
     try: # Очистка старых
-        count_query = supabase.table("message_history").select("id", count="exact").eq("user_id", user_id); count_result = count_query.execute(); current_count = count_result.count if count_result.count is not None else 0 # БЕЗ await
+        count_query = supabase.table("message_history").select("id", count="exact").eq("user_id", user_id); count_result = count_query.execute(); current_count = count_result.count if count_result.count is not None else 0
         if current_count > HISTORY_LIMIT:
             num_to_delete = current_count - HISTORY_LIMIT; logger.info(f"History {user_id} ({current_count}/{HISTORY_LIMIT}). Deleting {num_to_delete} old (sync).")
-            select_oldest_query = (supabase.table("message_history").select("id").eq("user_id", user_id).order("created_at", desc=False).limit(num_to_delete)); oldest_result = select_oldest_query.execute(); ids_to_delete = [msg["id"] for msg in oldest_result.data] # БЕЗ await
-            if ids_to_delete: delete_query = supabase.table("message_history").delete().in_("id", ids_to_delete); delete_query.execute(); logger.info(f"Deleted {len(ids_to_delete)} old messages {user_id} (sync)") # БЕЗ await
+            select_oldest_query = (supabase.table("message_history").select("id").eq("user_id", user_id).order("created_at", desc=False).limit(num_to_delete)); oldest_result = select_oldest_query.execute(); ids_to_delete = [msg["id"] for msg in oldest_result.data]
+            if ids_to_delete: delete_query = supabase.table("message_history").delete().in_("id", ids_to_delete); delete_query.execute(); logger.info(f"Deleted {len(ids_to_delete)} old messages {user_id} (sync)")
     except Exception as e_clean: logger.error(f"Sync Supabase add_message_to_history (cleanup) error for {user_id}: {e_clean}", exc_info=True)
     return True
 
