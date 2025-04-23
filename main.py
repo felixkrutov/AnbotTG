@@ -1,4 +1,4 @@
-# --- НАЧАЛО ПОЛНОГО КОДА main.py (v3 - ИСПРАВЛЕННЫЙ LIFESPAN) ---
+# --- НАЧАЛО ПОЛНОГО КОДА main.py (v4 - РУЧНОЙ ВЕБХУК + КРИТ ЛОГ) ---
 import os
 import logging
 import asyncio
@@ -32,7 +32,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 ADMIN_SECRET_KEY = os.getenv("ADMIN_SECRET_KEY", "default_secret_key_please_change")
-WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "")
+WEBHOOK_BASE_URL = os.getenv("WEBHOOK_BASE_URL", "") # Читаем, но не используем в lifespan для установки
 WEBHOOK_PATH = f"/webhook/{TELEGRAM_BOT_TOKEN}"
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "my-super-secret")
 HISTORY_LIMIT = 50
@@ -42,7 +42,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - [%
 logger = logging.getLogger(__name__)
 
 logger.info(f"--- Старт модуля main.py ---")
-logger.info(f"WEBHOOK_BASE_URL (из env): {WEBHOOK_BASE_URL}")
 
 # --- 3. Инициализация ---
 try:
@@ -57,57 +56,20 @@ except Exception as e: logger.error(f"Ошибка при инициализац
 # --- 4. Настройка FastAPI ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(">>> Lifespan: Startup начался...")
-    # --- Блок установки вебхука ---
-    current_webhook_url_to_set = f"{WEBHOOK_BASE_URL.rstrip('/')}{WEBHOOK_PATH}"
-    if not WEBHOOK_BASE_URL:
-        logger.warning(">>> Lifespan: WEBHOOK_BASE_URL пустой! Пропускаем установку вебхука.")
-    else:
-        try:
-            logger.info(f">>> Lifespan: Устанавливаем вебхук на {current_webhook_url_to_set}...")
-            await bot.set_webhook(url=current_webhook_url_to_set, secret_token=WEBHOOK_SECRET, allowed_updates=dp.resolve_used_update_types(), drop_pending_updates=True)
-            logger.info(f"--- УСПЕХ! --- >>> Lifespan: Вебхук УСПЕШНО установлен!")
-            try: await bot.set_my_commands([BotCommand(command="start", description="Начать")]); logger.info(">>> Lifespan: Команды бота установлены.")
-            except Exception as e_cmd: logger.error(f">>> Lifespan: Ошибка установки команд: {e_cmd}", exc_info=True)
-        except Exception as e_set: logger.error(f"--- ОШИБКА! --- >>> Lifespan: Ошибка установки вебхука: {e_set}", exc_info=True)
-
-    logger.info(">>> Lifespan: Startup завершен, yield...")
-    yield # Сервер работает
-
-    # --- Блок остановки ---
-    logger.info(">>> Lifespan: Shutdown начался...")
-    # --- ИСПРАВЛЕННЫЙ БЛОК УДАЛЕНИЯ ВЕБХУКА ---
+    # Упрощаем lifespan - НЕ УСТАНАВЛИВАЕМ И НЕ УДАЛЯЕМ вебхук отсюда
+    logger.info(">>> Lifespan: Startup начался (вебхук устанавливается вручную).")
+    yield
+    logger.info(">>> Lifespan: Shutdown начался (вебхук удаляется вручную).")
     try:
-        logger.info(">>> Lifespan: Пытаемся получить информацию о вебхуке перед удалением...")
-        webhook_info = await bot.get_webhook_info()
-        logger.info(f">>> Lifespan: Текущий вебхук перед удалением: {webhook_info}")
-        if webhook_info.url: # Удаляем только если он был установлен
-            logger.info(f">>> Lifespan: Удаляем вебхук ({webhook_info.url})...")
-            await bot.delete_webhook(drop_pending_updates=True)
-            logger.info(">>> Lifespan: Вебхук удален.")
-        else:
-             logger.info(">>> Lifespan: Вебхук не был установлен, удалять нечего.")
-    except Exception as e_del:
-        logger.error(f">>> Lifespan: Ошибка удаления вебхука: {e_del}", exc_info=True)
-    # -----------------------------------------
-    # --- Блок закрытия сессии ---
-    try:
-        if bot and bot.session:
-            logger.info(">>> Lifespan: Пытаемся закрыть сессию бота...")
-            await bot.session.close()
-            logger.info(">>> Lifespan: Сессия Aiogram Bot закрыта.")
-        else:
-             logger.info(">>> Lifespan: Сессия бота не найдена или уже закрыта.")
-    except Exception as e_close:
-        logger.error(f">>> Lifespan: Ошибка закрытия сессии бота: {e_close}", exc_info=True)
-    # ---------------------------
+        if bot and bot.session: await bot.session.close(); logger.info(">>> Lifespan: Сессия Aiogram Bot закрыта.")
+    except Exception as e_close: logger.error(f">>> Lifespan: Ошибка закрытия сессии бота: {e_close}", exc_info=True)
     logger.info(">>> Lifespan: Shutdown завершен.")
 
 app = FastAPI(lifespan=lifespan, openapi_url="/api/v1/openapi.json", docs_url="/api/docs", redoc_url="/api/redoc")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- 6. Функции Supabase (СИНХРОННЫЕ ВЫЗОВЫ) ---
-# ... (get_settings, update_settings_db, get_message_history, add_message_to_history БЕЗ await перед execute, как в рабочей версии) ...
+# ... (get_settings, update_settings_db, get_message_history, add_message_to_history БЕЗ await перед execute) ...
 async def get_settings():
     try: query = supabase.table("settings").select("groq_api_key, system_prompt").eq("id", 1).limit(1); result = query.execute()
     except Exception as e: logger.error(f"Sync Supabase get_settings error: {e}", exc_info=True); return {"groq_api_key": None, "system_prompt": "..."}
@@ -169,9 +131,13 @@ async def get_current_settings_api(): logger.info("API /api/settings GET"); retu
 async def update_settings_api(settings_data: SettingsUpdate): logger.info("API /api/settings POST"); success = await update_settings_db(settings_data.groq_api_key, settings_data.system_prompt); return {"message": "OK"} if success else HTTPException(status_code=500, detail="Update failed")
 @app.get("/")
 async def read_root(): return {"message": "Бот жив!"}
+
 @app.post(WEBHOOK_PATH)
 async def bot_webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(None)):
-    logger.info(f">>> Webhook: Получен POST запрос на {WEBHOOK_PATH}")
+    # ----- ДОБАВЛЕН КРИТИЧЕСКИЙ ЛОГ ЗДЕСЬ -----
+    logger.critical("!!! ПОЛУЧЕН ЗАПРОС НА ВЕБХУК !!!")
+    # ------------------------------------------
+    logger.info(f">>> Webhook: Заголовок X-Telegram-Bot-Api-Secret-Token: {'Есть' if x_telegram_bot_api_secret_token else 'Нет'}")
     if WEBHOOK_SECRET and x_telegram_bot_api_secret_token != WEBHOOK_SECRET: logger.warning(">>> Webhook: Неверный секрет!"); raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="...")
     try: update_data = await request.json(); logger.info(f">>> Webhook: Тело запроса (частично): {json.dumps(update_data, ensure_ascii=False)[:200]}...")
     except Exception as e_body: logger.error(f">>> Webhook: Ошибка чтения тела: {e_body}", exc_info=True); raise HTTPException(status_code=500, detail="...")
